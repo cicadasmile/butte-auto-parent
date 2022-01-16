@@ -1,0 +1,16 @@
+server:
+  tomcat:
+    uri-encoding: UTF-8
+  port: 8082
+spring:
+  application:
+    name: auto-serve
+  http:
+    encoding:
+      charset: UTF-8
+      force: true
+      enabled: true
+logging:
+  file:
+    name: logs/${spring.application.name}.log
+    path: ./

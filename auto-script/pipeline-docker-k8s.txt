@@ -1,0 +1,233 @@
+pipeline {
+    agent any
+
+    // 日志时间打印
+    options {
+        timestamps()
+    }
+
+    // 触发配置
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'repository_name', value: '$.repository.name'],
+                [key: 'repository_git_url', value: '$.repository.git_http_url'],
+                [key: 'committer_name', value: '$.head_commit.committer.user_name'],
+                [key: 'before', value: '$.before'],
+                [key: 'after', value: '$.after']
+            ],
+            // causeString: ' Triggered on $ref' ,
+            // printContributedVariables: true,
+            // 打印请求参数
+            // printPostContent: true
+        )
+    }
+
+    // 声明环境变量
+    environment {
+        branch = env.ref.split("/")[2].trim()
+        is_master_branch = "master".equals(branch)
+        is_create_branch = env.before.replace('0','').trim().equals("")
+        is_delete_branch = env.after.replace('0','').trim().equals("")
+        is_success = false
+
+        docker_directory = 'docker-app'
+        docker_repository = 'docker_repository_url'
+
+        k8s_directory = 'k8s-deploy'
+    }
+
+    stages {
+        // 解析仓库信息
+        stage('Parse') {
+
+            steps {
+                echo "仓库分支 : ${branch} \n仓库名称 : ${repository_name} \n仓库地址 : ${repository_git_url} \n提交用户 : ${committer_name}"
+                script {
+                    if ("true".equals(is_master_branch)) {
+                        echo "保护分支 : ${branch}"
+                    }
+                    if ("true".equals(is_create_branch)) {
+                        echo "创建分支 : ${branch}"
+                    }
+                    if ("true".equals(is_delete_branch)) {
+                        echo "删除分支 : ${branch}"
+                    }
+                }
+            }
+        }
+
+        // 拉取仓库分支
+        stage('GitPull') {
+            steps {
+                script {
+                    if ("false".equals(is_delete_branch)) {
+                        echo "拉取分支 : ${branch}"
+                        git branch: "${branch}",url: "${repository_git_url}"
+                    }
+                }
+            }
+        }
+
+        // 解析仓库Pom文件
+        stage('MvnPom') {
+            steps {
+                script {
+                    // 解析Pom文件内容
+                    def pom = readMavenPom file: 'pom.xml'
+                    def version = "${pom.version}"
+                    def encode = pom.getProperties().get("project.build.sourceEncoding")
+                    echo "Pom版本 : "+ version
+                    echo "Pom编码 : "+ encode
+                    def devVersion = "${branch}-"+version
+                    def jarName = "${branch}-"+version+".jar"
+                    echo "Now版本 : "+ devVersion
+                    echo "Jar名称 : "+ jarName
+
+                    // 修改Pom文件内容
+                    // pom.getProperties().put("dev.version","${devVersion}".trim().toString())
+                    // writeMavenPom file: 'pom.xml', model: pom
+
+                    echo "update pom success"
+                }
+            }
+        }
+
+        // 推送仓库分支
+        stage('GitPush') {
+            steps {
+                script {
+                    echo "git push success"
+                }
+            }
+        }
+
+        // 本地打包流程
+        stage('Package') {
+            steps {
+                script {
+                    sh 'mvn clean package -Dmaven.test.skip=true'
+                    is_success = true
+                }
+            }
+        }
+
+        // 构建Dokerfile文件包
+        stage('Dockerfile') {
+            steps {
+                sh '''
+                rm -rf ${docker_directory}
+                mkdir -p ${docker_directory}
+                cp auto-client/target/auto-client-1.0-SNAPSHOT.jar ${docker_directory}/auto-client.jar
+                cd ${docker_directory}
+cat>Dockerfile<<EOF
+FROM java:8
+MAINTAINER cicadasmile
+VOLUME /data/docker/logs
+ADD auto-client.jar application.jar
+ENTRYPOINT ["java","-Dspring.profiles.active=dev","-Djava.security.egd=file:/dev/./urandom","-jar","/application.jar"]
+EOF
+                cat Dockerfile
+                '''
+                echo "create Dockerfile success"
+            }
+        }
+
+        // 构建镜像文件
+        stage('DockerImage'){
+            steps {
+                script {
+                    dir("${docker_directory}") {
+                        sh 'ls'
+                        docker.withRegistry("${docker_repository}", '配置访问凭据') {
+                            docker.build("镜像信息").push()
+                        }
+                    }
+                    echo "build DockerImage success"
+                }
+            }
+        }
+
+        // 启动Docker容器
+        stage('DockerContainer'){
+            steps {
+                script {
+                    echo "run DockerContainer success"
+                }
+            }
+        }
+
+        // K8S部署Docker镜像
+        stage('K8Sdeploy') {
+            steps {
+                sh '''
+                rm -rf ${k8s_directory}
+                mkdir -p ${k8s_directory}
+                cd ${k8s_directory}
+cat>k8s-app.yaml<<EOF
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-app-deployment
+  labels:
+    app: k8s-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: k8s-app
+  template:
+    metadata:
+      labels:
+        app: k8s-app
+    spec:
+      containers:
+      - name: k8s-app
+        image: cicada-image/doc-line-app:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8079
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-app-service
+  labels:
+    app: k8s-app
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8079
+  selector:
+    app: k8s-app
+EOF
+                cat k8s-app.yaml
+                echo "create k8s-app.yaml success"
+
+                echo "base Yaml file deploy k8s resource"
+                ls
+
+                sleep 10
+
+                set +e
+                kubectl delete -f k8s-app.yaml
+
+                set -e
+                kubectl create -f k8s-app.yaml
+                '''
+            }
+        }
+    }
+
+    // 执行最终通知
+    post {
+        always {
+            script {
+                echo "notify : ${committer_name} , pipeline is success : ${is_success}"
+            }
+        }
+    }
+}

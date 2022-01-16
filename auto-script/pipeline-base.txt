@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+
+    // 日志时间打印
+    options {
+        timestamps()
+    }
+
+    // 触发配置
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'repository_name', value: '$.repository.name'],
+                [key: 'repository_git_url', value: '$.repository.git_http_url'],
+                [key: 'committer_name', value: '$.head_commit.committer.user_name'],
+                [key: 'before', value: '$.before'],
+                [key: 'after', value: '$.after']
+            ],
+            // causeString: ' Triggered on $ref' ,
+            // printContributedVariables: true,
+            // 打印请求参数
+            // printPostContent: true
+        )
+    }
+
+    // 声明环境变量
+    environment {
+        branch = env.ref.split("/")[2].trim()
+        is_master_branch = "master".equals(branch)
+        is_create_branch = env.before.replace('0','').trim().equals("")
+        is_delete_branch = env.after.replace('0','').trim().equals("")
+        is_success = false
+    }
+
+    // 流程步骤
+    stages {
+        // 解析仓库信息
+        stage('Parse') {
+
+            steps {
+                echo "仓库分支 : ${branch} \n仓库名称 : ${repository_name} \n仓库地址 : ${repository_git_url} \n提交用户 : ${committer_name}"
+                script {
+                    if ("true".equals(is_master_branch)) {
+                        echo "保护分支 : ${branch}"
+                    }
+                    if ("true".equals(is_create_branch)) {
+                        echo "创建分支 : ${branch}"
+                    }
+                    if ("true".equals(is_delete_branch)) {
+                        echo "删除分支 : ${branch}"
+                    }
+                }
+            }
+        }
+
+        // 拉取仓库分支
+        stage('GitPull') {
+            steps {
+                script {
+                    if ("false".equals(is_delete_branch)) {
+                        echo "拉取分支 : ${branch}"
+                        git branch: "${branch}",url: "${repository_git_url}"
+                    }
+                }
+            }
+        }
+
+        // 解析仓库Pom文件
+        stage('MvnPom') {
+            steps {
+                script {
+                    // 解析Pom文件内容
+                    def pom = readMavenPom file: 'pom.xml'
+                    def version = "${pom.version}"
+                    def encode = pom.getProperties().get("project.build.sourceEncoding")
+                    echo "Pom版本 : "+ version
+                    echo "Pom编码 : "+ encode
+                    def devVersion = "${branch}-"+version
+                    def jarName = "${branch}-"+version+".jar"
+                    echo "Now版本 : "+ devVersion
+                    echo "Jar名称 : "+ jarName
+
+                    // 修改Pom文件内容
+                    // pom.getProperties().put("dev.version","${devVersion}".trim().toString())
+                    // writeMavenPom file: 'pom.xml', model: pom
+
+                    echo "update pom success"
+                }
+            }
+        }
+
+        // 推送仓库分支
+        stage('GitPush') {
+            steps {
+                script {
+                    echo "git push success"
+                }
+            }
+        }
+
+        // 本地打包流程
+        stage('Package') {
+            steps {
+                script {
+                    sh 'mvn clean package -Dmaven.test.skip=true'
+                    is_success = true
+                }
+            }
+        }
+    }
+
+    // 执行最终通知
+    post {
+        always {
+            script {
+                echo "notify : ${committer_name} , pipeline is success : ${is_success}"
+            }
+        }
+    }
+}
